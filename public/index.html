@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Location Sharing Application</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      #map { height: 100vh; width: 100vw; }
+      body { margin: 0; padding: 0; }
+      .named-marker {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+      }
+      .named-marker .marker-label {
+        background: rgba(0,0,0,0.75);
+        color: #fff;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 7px;
+        border-radius: 20px;
+        white-space: nowrap;
+        backdrop-filter: blur(4px);
+        border: 1px solid rgba(255,255,255,0.15);
+        letter-spacing: 0.3px;
+      }
+      .named-marker .marker-dot {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        border: 2px solid #fff;
+        box-shadow: 0 0 6px rgba(0,0,0,0.4);
+      }
+      .named-marker .marker-dot.other { background: #3b82f6; }
+      .named-marker .marker-dot.self  { background: #22c55e; }
+    </style>
+  </head>
+  <body class="bg-black text-white">
+    <!-- Auth Overlay -->
+    <div id="auth-overlay" class="fixed inset-0 z-[1000] flex items-center justify-center bg-black hidden">
+        <div class="bg-[#111111] p-10 rounded-2xl text-center max-w-[400px] w-full border border-white/10 shadow-2xl">
+            <div class="w-12 h-12 bg-white rounded-xl mx-auto flex items-center justify-center mb-6">
+                <span class="text-black font-bold text-2xl">R</span>
+            </div>
+            <h1 class="text-2xl font-bold text-white mb-3 tracking-tight">Location App</h1>
+            <p class="text-gray-400 mb-8 text-sm leading-relaxed">Secure real-time location sharing powered by Rachit's Auth.</p>
+            <a href="/auth/login" class="inline-flex w-full items-center justify-center bg-white hover:bg-gray-200 text-black font-medium py-3 rounded-lg transition-colors duration-200">
+                Continue with Rachit's Auth
+            </a>
+        </div>
+    </div>
+
+    <!-- Map UI -->
+    <div id="app-ui" class="hidden relative h-screen w-screen">
+        <div class="absolute top-6 right-6 z-[1000] bg-[#111111] border border-white/10 text-white px-5 py-3 rounded-xl shadow-2xl flex items-center gap-4">
+            <div class="font-medium text-sm flex items-center gap-3">
+                <div class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]"></div>
+                <span id="user-greeting" class="text-gray-200">Loading...</span>
+            </div>
+            <div class="w-px h-4 bg-white/10"></div>
+            <a href="/auth/logout" class="text-xs text-gray-400 hover:text-white font-medium transition-colors">Sign out</a>
+        </div>
+        <div id="map"></div>
+    </div>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="/socket.io/socket.io.js"></script>
+
+    <script>
+      let myUser = null;
+      let socket = null;
+      let map = null;
+
+      const remoteMarkers = new Map();
+      let myCurrentLocationMarker = null;
+      let isFirstLocation = true;
+
+      async function checkAuth() {
+        try {
+            const res = await fetch('/auth/me');
+            if (res.ok) {
+                myUser = await res.json();
+                document.getElementById('auth-overlay').classList.add('hidden');
+                document.getElementById('app-ui').classList.remove('hidden');
+                document.getElementById('user-greeting').textContent = `Hi, ${myUser.name}`;
+                initApp();
+            } else {
+                document.getElementById('auth-overlay').classList.remove('hidden');
+                document.getElementById('app-ui').classList.add('hidden');
+            }
+        } catch(err) {
+            console.error("Auth check failed", err);
+            document.getElementById('auth-overlay').classList.remove('hidden');
+        }
+      }
+
+      function initApp() {
+        socket = io();
+        map = L.map('map').setView([0, 0], 2);
+
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        }).addTo(map);
+
+        socket.on('server:location:update', (data) => {
+            const { id, name, latitude, longitude } = data;
+            if (id === myUser.id) return;
+            if (!remoteMarkers.has(id)) {
+              const marker = L.marker([latitude, longitude], { icon: makeIcon(name, 'other') })
+                .addTo(map)
+                .bindPopup(`<b>${name || id}</b>`);
+              remoteMarkers.set(id, marker);
+            } else {
+              const existingMarker = remoteMarkers.get(id);
+              existingMarker.setLatLng([latitude, longitude]);
+            }
+        });
+
+        socket.on('server:user:disconnected', ({ id }) => {
+            if (remoteMarkers.has(id)) {
+              remoteMarkers.get(id).remove();
+              remoteMarkers.delete(id);
+            }
+        });
+
+        // Update immediately on load
+        updateMyLocation();
+        // Then update every 10 seconds
+        setInterval(updateMyLocation, 10 * 1000);
+      }
+
+      function getUsersCurrentLocation() {
+        return new Promise((res, rej) => {
+          if ('geolocation' in navigator) {
+            navigator.geolocation.getCurrentPosition(
+              (position) => {
+                const latitude = position.coords.latitude;
+                const longitude = position.coords.longitude;
+                res({ latitude, longitude });
+              },
+              (err) => {
+                rej(err);
+              },
+              { enableHighAccuracy: true },
+            );
+          } else {
+            rej(new Error('Geolocation is not available in this browser'));
+          }
+        });
+      }
+
+      async function updateMyLocation() {
+        try {
+          const { latitude, longitude } = await getUsersCurrentLocation();
+          
+          if(socket) {
+            socket.emit('client:location:update', { latitude, longitude });
+          }
+
+          if (!myCurrentLocationMarker) {
+            myCurrentLocationMarker = L.marker([latitude, longitude], { icon: makeIcon(myUser.name, 'self') })
+              .addTo(map)
+              .bindPopup('<b>You are here</b>');
+          } else {
+            myCurrentLocationMarker.setLatLng([latitude, longitude]);
+          }
+
+          if (isFirstLocation) {
+            map.setView([latitude, longitude], 15);
+            isFirstLocation = false;
+          }
+        } catch (error) {
+          console.error('Error getting location:', error.message);
+        }
+      }
+
+      function makeIcon(name, type) {
+        return L.divIcon({
+          className: '',
+          html: `<div class="named-marker"><div class="marker-label">${name || 'Unknown'}</div><div class="marker-dot ${type}"></div></div>`,
+          iconAnchor: [0, 28],
+          popupAnchor: [0, -30],
+        });
+      }
+
+      window.addEventListener('load', checkAuth);
+    </script>
+  </body>
+</html>
