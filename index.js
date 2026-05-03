@@ -179,12 +179,12 @@ async function main() {
   });
 
   app.get('/auth/logout', (req, res) => {
+    // Clear local session
     res.clearCookie('auth_user');
-    const logoutUrl = new URL(`${AUTH_SERVER}/api/auth/logout`);
-    logoutUrl.searchParams.set('client_id', CLIENT_ID);
-    // Redirects back to your app or website after signout
-    logoutUrl.searchParams.set('post_logout_redirect_uri', process.env.APP_URL || 'http://localhost:8000');
-    res.redirect(logoutUrl.toString());
+    
+    // Redirect immediately back to the app's home page
+    // (Bypasses global SSO logout to ensure user stays on the app)
+    res.redirect('/');
   });
 
   app.get('/auth/me', (req, res) => {
